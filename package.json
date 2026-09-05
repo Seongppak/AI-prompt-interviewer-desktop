@@ -1,0 +1,44 @@
+{
+  "name": "ai-prompt-interviewer-desktop",
+  "private": true,
+  "version": "4.0.0",
+  "description": "Windows desktop interviewer that rewrites prompts for AI tools",
+  "author": "Seongppak",
+  "repository": "https://github.com/Seongppak/AI-prompt-interviewer-desktop",
+  "main": "apps/desktop/electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "node apps/desktop/dev.mjs",
+    "dev:desktop": "node apps/desktop/dev.mjs",
+    "build": "npm run build:desktop",
+    "build:desktop": "node apps/desktop/native/build-interceptor.mjs && tsc -p tsconfig.desktop.json --noEmit && vite build --config vite.desktop.config.ts",
+    "start:desktop": "npm run build:desktop && electron apps/desktop/electron/main.cjs",
+    "package:desktop:win": "npm run build:desktop && node apps/desktop/package-windows.mjs",
+    "typecheck:core": "tsc -p packages/core/tsconfig.json --noEmit",
+    "typecheck:gemini-adapter": "tsc -p adapters/gemini/tsconfig.json --noEmit",
+    "typecheck:clipboard-adapter": "tsc -p adapters/clipboard/tsconfig.json --noEmit",
+    "typecheck:desktop-adapter": "tsc -p adapters/desktop/tsconfig.json --noEmit",
+    "test:native-interceptor": "node apps/desktop/native/build-interceptor.mjs && node apps/desktop/native/test-interceptor.mjs",
+    "typecheck:protocol": "tsc -p packages/protocol/tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:core": "vitest run packages/core",
+    "lint": "oxlint",
+    "preview": "vite preview --config vite.desktop.config.ts"
+  },
+  "dependencies": {
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "electron": "^43.4.1",
+    "electron-builder": "^26.15.3",
+    "oxlint": "^1.71.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1",
+    "vitest": "^4.1.11"
+  }
+}
