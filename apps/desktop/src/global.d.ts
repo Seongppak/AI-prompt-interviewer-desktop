@@ -4,6 +4,7 @@ interface InterceptorStatus {
   enabled: boolean
   available: boolean
   error: string
+  bypassShortcut: 'ctrl-enter' | 'alt-enter'
 }
 
 interface InterceptedPrompt {
@@ -24,6 +25,7 @@ declare global {
       interceptor: {
         status(): Promise<InterceptorStatus>
         setEnabled(enabled: boolean): Promise<InterceptorStatus>
+        setBypassShortcut(shortcut: 'ctrl-enter' | 'alt-enter'): Promise<InterceptorStatus>
         insertPrompt(text: string): Promise<{ ok: boolean; error: string }>
         onCapture(listener: (capture: InterceptedPrompt) => void): () => void
         onStatus(listener: (status: InterceptorStatus) => void): () => void

@@ -1,5 +1,6 @@
-.desktop-badge { display: flex; gap: 8px; align-items: center; color: #9fb0d0; }
+.desktop-badge { display: flex; min-width: 150px; padding: 12px 14px; border: 1px solid rgba(103, 232, 193, .35); border-radius: 12px; background: rgba(47, 211, 177, .07); flex-direction: column; gap: 3px; color: #9fb0d0; }
 .desktop-badge strong { color: #8de2c6; }
+.desktop-badge span { font-size: 12px; }
 .clipboard-row { display: flex; gap: 10px; margin-bottom: 14px; }
 .clipboard-row button { flex: 1; }
 .desktop-status { margin: 14px 0 0; color: #8de2c6; font-size: 13px; }
@@ -18,11 +19,43 @@
 .shortcut-hint.shortcut-error { border-color: rgba(255, 100, 100, .3); }
 .shortcut-hint.shortcut-error strong { color: #ff9d9d; }
 .interceptor-bar { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px 18px; margin: 10px 56px 0; padding: 14px; border: 1px solid rgba(132, 116, 255, .28); border-radius: 12px; background: rgba(25, 24, 52, .55); }
-.interceptor-bar div { display: grid; gap: 4px; }
+.interceptor-bar .interceptor-copy { display: grid; gap: 4px; }
 .interceptor-bar strong { color: #d4d8e8; }
 .interceptor-bar span { color: #8f9ab5; font-size: 12px; }
+.interceptor-actions { display: flex; align-items: center; gap: 8px; }
+.interceptor-actions label { color: #8f9ab5; font-size: 12px; white-space: nowrap; }
+.interceptor-actions select { min-height: 36px; padding: 0 8px; }
 .interceptor-bar.interceptor-on { border-color: rgba(103, 232, 193, .45); box-shadow: inset 3px 0 #67e8c1; }
 .interceptor-bar.interceptor-on strong { color: #8de2c6; }
 .interceptor-bar.interceptor-error { border-color: rgba(255, 100, 100, .4); }
 .interceptor-bar small { grid-column: 1 / -1; color: #ff9d9d; }
+
+.diagnostic-summary {
+  display: grid;
+  gap: 5px;
+  margin: 16px 18px 10px;
+  padding: 14px;
+  border: 1px solid rgba(103, 232, 193, .3);
+  border-radius: 10px;
+  background: rgba(47, 211, 177, .07);
+}
+.diagnostic-summary.has-issues { border-color: rgba(239, 106, 119, .35); background: rgba(239, 106, 119, .07); }
+.diagnostic-summary strong { color: #8de2c6; }
+.diagnostic-summary.has-issues strong { color: #ff9d9d; }
+.diagnostic-summary span { color: #8f9ab5; font-size: 12px; }
+.diagnostic-issues { display: grid; gap: 9px; max-height: 290px; padding: 0 18px 14px; overflow-y: auto; }
+.diagnostic-issue { padding: 12px; border: 1px solid rgba(232, 180, 91, .3); border-radius: 9px; background: rgba(232, 180, 91, .05); }
+.diagnostic-issue.error { border-color: rgba(239, 106, 119, .35); background: rgba(239, 106, 119, .05); }
+.diagnostic-issue > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.diagnostic-issue > div strong { color: #f0bd68; font-size: 13px; }
+.diagnostic-issue.error > div strong { color: #ff9d9d; }
+.diagnostic-issue > div span { color: #737c8d; font-size: 10px; text-align: right; }
+.diagnostic-issue p { display: grid; grid-template-columns: 34px 1fr; gap: 7px; margin: 8px 0 0; color: #b8bfcc; font-size: 11px; line-height: 1.45; }
+.diagnostic-issue p b { color: #7f8998; }
+.open-ai-studio { padding: 9px 12px; border: 1px solid #4a426f; border-radius: 8px; background: #211e32; color: #c0baff; }
+.log-drawer .log-list { flex: 1; min-height: 120px; }
+.log-facts { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.log-facts span { padding: 3px 6px; border-radius: 5px; background: #202532; color: #9099aa; font: 10px "Cascadia Code", Consolas, monospace; }
+.log-entry details { margin-top: 9px; padding-top: 8px; }
+.log-entry details pre { max-height: 150px; margin-top: 8px; }
 @media (max-width: 900px) { .project-toolbar { grid-template-columns: 1fr 1fr; margin-inline: 24px; } }

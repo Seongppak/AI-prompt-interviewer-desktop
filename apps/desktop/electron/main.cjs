@@ -9,6 +9,7 @@ let captureShortcut = ''
 let interceptorProcess = null
 let interceptorError = ''
 let lastInterceptedWindow = ''
+let interceptorBypassShortcut = 'ctrl-enter'
 
 function interceptorExecutablePath() {
   return app.isPackaged
@@ -21,6 +22,7 @@ function interceptorStatus() {
     enabled: interceptorProcess !== null,
     available: process.platform === 'win32',
     error: interceptorError,
+    bypassShortcut: interceptorBypassShortcut,
   }
 }
 
@@ -78,7 +80,10 @@ function startInterceptor() {
   const executable = interceptorExecutablePath()
   let stdoutBuffer = ''
   interceptorError = ''
-  const child = spawn(executable, [], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(executable, [`--bypass-shortcut=${interceptorBypassShortcut}`], {
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
   interceptorProcess = child
   child.stdout.setEncoding('utf8')
   child.stdout.on('data', (chunk) => {
@@ -110,6 +115,19 @@ function stopInterceptor() {
   interceptorProcess = null
   if (child && !child.killed) child.kill()
   interceptorError = ''
+  return interceptorStatus()
+}
+
+function setInterceptorBypassShortcut(shortcut) {
+  if (!['ctrl-enter', 'alt-enter'].includes(shortcut)) throw new Error('지원하지 않는 우회 단축키입니다.')
+  if (interceptorBypassShortcut === shortcut) return interceptorStatus()
+  interceptorBypassShortcut = shortcut
+  const wasEnabled = interceptorProcess !== null
+  if (wasEnabled) {
+    stopInterceptor()
+    startInterceptor()
+  }
+  sendInterceptorStatus()
   return interceptorStatus()
 }
 
@@ -168,6 +186,7 @@ ipcMain.handle('external:gemini-api-key', () => {
 ipcMain.handle('shortcut:capture:get', () => captureShortcut)
 ipcMain.handle('interceptor:status:get', () => interceptorStatus())
 ipcMain.handle('interceptor:set-enabled', (_event, enabled) => enabled ? startInterceptor() : stopInterceptor())
+ipcMain.handle('interceptor:set-bypass-shortcut', (_event, shortcut) => setInterceptorBypassShortcut(shortcut))
 ipcMain.handle('interceptor:insert-result', (_event, text) => insertIntoLastInterceptedWindow(text))
 registerProjectStore(ipcMain, app)
 registerSecretStore(ipcMain, app, safeStorage)

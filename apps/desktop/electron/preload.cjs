@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('aipiDesktop', {
   interceptor: {
     status: () => ipcRenderer.invoke('interceptor:status:get'),
     setEnabled: (enabled) => ipcRenderer.invoke('interceptor:set-enabled', enabled),
+    setBypassShortcut: (shortcut) => ipcRenderer.invoke('interceptor:set-bypass-shortcut', shortcut),
     insertPrompt: (text) => ipcRenderer.invoke('interceptor:insert-result', text),
     onCapture: (listener) => {
       const handler = (_event, capture) => listener(capture)

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import targetsMarkdown from '../../../prompts/targets.md?raw'
 import { GeminiAIProvider } from '../../../adapters/gemini/src'
 import { DesktopChatTargetAdapter } from '../../../adapters/desktop/src'
@@ -16,6 +16,8 @@ import {
 } from '../../../packages/core/src'
 import { FakeAIProvider } from './fakeAIProvider'
 import { LocalStorageAdapter } from './local-storage-adapter'
+import { DiagnosticsMenu } from './DiagnosticsMenu'
+import { recordDiagnostic, recordGeminiDiagnostic } from './diagnostics'
 import {
   DesktopProjectRepository,
   projectNameFromPrompt,
@@ -27,6 +29,10 @@ const fakeProvider = new FakeAIProvider()
 const guidanceProvider = new MarkdownTargetGuidanceProvider(targetsMarkdown)
 const preferenceService = new PreferenceService(new LocalStorageAdapter())
 const projectRepository = new DesktopProjectRepository(window.aipiDesktop.projects)
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
 
 function phaseLabel(session: InterviewSession | null): string {
   if (!session) return '프롬프트 준비'
@@ -40,6 +46,7 @@ function phaseLabel(session: InterviewSession | null): string {
 export function App() {
   const [originalPrompt, setOriginalPrompt] = useState('')
   const [targetId, setTargetId] = useState('codex')
+  const targetSelection = useRef({ id: 'codex', revision: 0, manual: false })
   const [providerMode, setProviderMode] = useState<'fake' | 'gemini'>('fake')
   const [apiKey, setApiKey] = useState('')
   const [apiKeySaved, setApiKeySaved] = useState(false)
@@ -55,7 +62,12 @@ export function App() {
   const [activeProjectId, setActiveProjectId] = useState('')
   const [projectName, setProjectName] = useState('')
   const [captureShortcut, setCaptureShortcut] = useState('')
-  const [interceptor, setInterceptor] = useState({ enabled: false, available: false, error: '' })
+  const [interceptor, setInterceptor] = useState<{
+    enabled: boolean
+    available: boolean
+    error: string
+    bypassShortcut: 'ctrl-enter' | 'alt-enter'
+  }>({ enabled: false, available: false, error: '', bypassShortcut: 'ctrl-enter' })
   const [capturedSourceTarget, setCapturedSourceTarget] = useState('')
 
   useEffect(() => {
@@ -65,15 +77,19 @@ export function App() {
       setApiKey(storedKey)
       setApiKeySaved(true)
       setProviderMode('gemini')
-    }).catch((error) => setNotice(`저장된 API 키를 불러오지 못했습니다: ${String(error)}`, true))
+    }).catch((error) => reportError('settings', '저장된 API 키를 불러오지 못했습니다.', error))
     void projectRepository.list().then((stored) => {
       setProjects(stored)
       if (stored[0]) loadProject(stored[0])
-    }).catch((error) => setNotice(`프로젝트 기록을 불러오지 못했습니다: ${String(error)}`, true))
+    }).catch((error) => reportError('projects', '프로젝트 기록을 불러오지 못했습니다.', error))
   }, [])
 
   useEffect(() => {
-    void window.aipiDesktop.interceptor.status().then(setInterceptor)
+    const storedShortcut = localStorage.getItem('desktop_interceptor_bypass_shortcut')
+    const initialStatus = storedShortcut === 'ctrl-enter' || storedShortcut === 'alt-enter'
+      ? window.aipiDesktop.interceptor.setBypassShortcut(storedShortcut)
+      : window.aipiDesktop.interceptor.status()
+    void initialStatus.then(setInterceptor)
     const stopCapture = window.aipiDesktop.interceptor.onCapture((capture) => {
       setOriginalPrompt(capture.prompt)
       setActiveProjectId('')
@@ -81,7 +97,7 @@ export function App() {
       setSession(null)
       setResultPrompt('')
       setCapturedSourceTarget(capture.target === 'test' ? '' : capture.target)
-      if (capture.target !== 'test') setTargetId(capture.target)
+      if (capture.target !== 'test') selectTarget(capture.target)
       setNotice(`${capture.source}의 ${capture.trigger === 'enter' ? 'Enter' : '전송 버튼'} 입력을 가로챘습니다.`)
     })
     const stopStatus = window.aipiDesktop.interceptor.onStatus(setInterceptor)
@@ -99,13 +115,27 @@ export function App() {
 
   function provider() {
     return providerMode === 'gemini'
-      ? new GeminiAIProvider({ apiKey: apiKey.trim() })
+      ? new GeminiAIProvider({
+          apiKey: apiKey.trim(),
+          onDiagnostic: recordGeminiDiagnostic,
+        })
       : fakeProvider
   }
 
   function setNotice(message: string, error = false) {
     setStatus(message)
     setStatusError(error)
+  }
+
+  function selectTarget(id: string, manual = false) {
+    targetSelection.current = { id, revision: targetSelection.current.revision + 1, manual }
+    setTargetId(id)
+  }
+
+  function reportError(source: string, message: string, error: unknown) {
+    const detail = errorMessage(error)
+    recordDiagnostic({ level: 'error', source, code: 'app_error', message, detail })
+    setNotice(`${message} ${detail}`, true)
   }
 
   function loadProject(project: DesktopProject) {
@@ -119,7 +149,7 @@ export function App() {
     setActiveProjectId(project.id)
     setProjectName(project.name)
     setOriginalPrompt(project.originalPrompt)
-    setTargetId(project.targetId)
+    selectTarget(project.targetId, true)
     setProviderMode(project.providerMode)
     setSession(recoveredSession)
     setResultPrompt(project.resultPrompt)
@@ -146,7 +176,7 @@ export function App() {
     try {
       setProjects(await projectRepository.upsert(project))
     } catch (error) {
-      setNotice(`프로젝트 저장에 실패했습니다: ${String(error)}`, true)
+      reportError('projects', '프로젝트 저장에 실패했습니다.', error)
     }
   }
 
@@ -164,11 +194,13 @@ export function App() {
       : '클립보드의 프롬프트를 가져왔습니다.')
   }
 
-  async function startInterview() {
+  async function startInterview(restarting = false) {
+    if (busy) return
     const prompt = originalPrompt.trim()
     if (!prompt) return setNotice('프롬프트를 입력하세요.', true)
     if (providerMode === 'gemini' && !apiKey.trim()) return setNotice('Gemini API 키를 입력하세요.', true)
     setBusy(true)
+    const selectionRevision = targetSelection.current.revision
     const created = engine.create({
       id: crypto.randomUUID(),
       originalPrompt: prompt,
@@ -180,22 +212,27 @@ export function App() {
     const nextName = projectNameFromPrompt(prompt)
     setProjectName(nextName)
     setResultPrompt('')
+    setCustomAnswer('')
     await persistProject(created, '', { name: nextName })
     try {
       const generated = await new QuestionGenerationService(provider()).generate(prompt)
       const next = engine.questionsGenerated(created, generated)
-      const nextTargetId = generated.recommendation?.targetId ?? targetId
+      if (!restarting && !capturedSourceTarget && !targetSelection.current.manual && generated.recommendation
+        && targetSelection.current.revision === selectionRevision) {
+        selectTarget(generated.recommendation.targetId)
+      }
+      const nextTargetId = targetSelection.current.id
       setSession(next)
-      if (generated.recommendation) setTargetId(nextTargetId)
       await persistProject(next, '', { name: nextName, targetId: nextTargetId })
+      recordDiagnostic({ level: 'info', source: 'interview', code: 'interview_ready', message: '인터뷰 질문 분석을 완료했습니다.' })
       setNotice(generated.questions.length ? '추가 정보를 선택해 주세요.' : '추가 질문 없이 최적화할 수 있습니다.')
     } catch (error) {
       const failed = engine.fail(created, {
-        code: 'PROVIDER_UNAVAILABLE', message: String(error), retryable: true, cause: error,
+        code: 'PROVIDER_UNAVAILABLE', message: errorMessage(error), retryable: true, cause: error,
       })
       setSession(failed)
       await persistProject(failed, '', { name: nextName })
-      setNotice(String(error), true)
+      reportError('interview', '인터뷰 질문 분석에 실패했습니다.', error)
     } finally {
       setBusy(false)
     }
@@ -224,6 +261,7 @@ export function App() {
       })
       setResultPrompt(optimized.prompt)
       await persistProject(session, optimized.prompt)
+      recordDiagnostic({ level: 'info', source: 'optimizer', code: 'optimization_ready', message: '최종 프롬프트 생성을 완료했습니다.' })
       setNotice(optimized.refined
         ? `${target.displayName}용 프롬프트를 생성하고 품질 보정까지 완료했습니다.`
         : `${target.displayName}용 최종 프롬프트를 만들었습니다.`)
@@ -235,7 +273,7 @@ export function App() {
       })
       setResultPrompt(fallback)
       await persistProject(session, fallback)
-      setNotice(`AI 재작성에 실패해 답변이 포함된 프롬프트를 표시합니다: ${String(error)}`, true)
+      reportError('optimizer', 'AI 재작성에 실패해 답변이 포함된 프롬프트를 표시합니다.', error)
     } finally {
       setBusy(false)
     }
@@ -262,7 +300,7 @@ export function App() {
       await adapter.sendPrompt(output)
       setNotice('완성된 프롬프트를 원래 채팅 입력창에 입력했습니다. 확인한 뒤 직접 전송하세요.')
     } catch (error) {
-      setNotice(`원래 채팅창에 입력하지 못했습니다: ${String(error)}`, true)
+      reportError('delivery', '원래 채팅창에 입력하지 못했습니다.', error)
     }
   }
 
@@ -277,7 +315,7 @@ export function App() {
       setNotice('Gemini API 키를 Windows 보안 저장소에 암호화해 저장했습니다.')
     } catch (error) {
       setApiKeySaved(false)
-      setNotice(`API 키 저장에 실패했습니다: ${String(error)}`, true)
+      reportError('settings', 'API 키 저장에 실패했습니다.', error)
     } finally {
       setSavingApiKey(false)
     }
@@ -291,7 +329,7 @@ export function App() {
       setApiKeySaved(false)
       setNotice('저장된 Gemini API 키를 삭제했습니다.')
     } catch (error) {
-      setNotice(`API 키 삭제에 실패했습니다: ${String(error)}`, true)
+      reportError('settings', 'API 키 삭제에 실패했습니다.', error)
     }
   }
 
@@ -323,7 +361,7 @@ export function App() {
       else reset()
       setNotice('프로젝트 기록을 삭제했습니다.')
     } catch (error) {
-      setNotice(`프로젝트 삭제에 실패했습니다: ${String(error)}`, true)
+      reportError('projects', '프로젝트 삭제에 실패했습니다.', error)
     }
   }
 
@@ -335,7 +373,17 @@ export function App() {
         ? '데스크톱 AI 앱과 IDE AI 채팅의 프롬프트 가로채기를 켰습니다.'
         : '프롬프트 가로채기를 껐습니다.', !next.enabled && !!next.error)
     } catch (error) {
-      setNotice(`프롬프트 가로채기 상태를 바꾸지 못했습니다: ${String(error)}`, true)
+      reportError('interceptor', '프롬프트 가로채기 상태를 바꾸지 못했습니다.', error)
+    }
+  }
+
+  async function changeInterceptorBypassShortcut(shortcut: 'ctrl-enter' | 'alt-enter') {
+    try {
+      localStorage.setItem('desktop_interceptor_bypass_shortcut', shortcut)
+      setInterceptor(await window.aipiDesktop.interceptor.setBypassShortcut(shortcut))
+      setNotice(`가로채기 없이 바로 전송하는 단축키를 ${shortcut === 'ctrl-enter' ? 'Ctrl+Enter' : 'Alt+Enter'}로 설정했습니다.`)
+    } catch (error) {
+      reportError('interceptor', '우회 단축키를 바꾸지 못했습니다.', error)
     }
   }
 
@@ -343,10 +391,17 @@ export function App() {
     <header className="hero">
       <div><p className="eyebrow">DESKTOP APP</p><h1>AI Prompt Interviewer</h1>
         <p className="hero-copy">원본 요청을 인터뷰하고 대상 AI에 맞는 완성 프롬프트로 다시 작성합니다.</p></div>
-      <div className="desktop-badge"><strong>● Desktop</strong><span>
-        {window.aipiDesktop.platform === 'win32' ? 'Windows' : window.aipiDesktop.platform}
-        {' · '}{window.aipiDesktop.arch}
-      </span></div>
+      <div className="hero-actions">
+        <DiagnosticsMenu onOpenGemini={() => {
+          void window.aipiDesktop.openGeminiApiKeyPage().catch((error) => {
+            recordDiagnostic({ level: 'error', source: 'desktop', code: 'app_error', message: 'Google AI Studio를 열지 못했습니다.', detail: String(error) })
+          })
+        }} />
+        <div className="desktop-badge"><strong>● Desktop</strong><span>
+          {window.aipiDesktop.platform === 'win32' ? 'Windows' : window.aipiDesktop.platform}
+          {' · '}{window.aipiDesktop.arch}
+        </span></div>
+      </div>
     </header>
 
     <section className="flow-strip" aria-label="작업 단계">
@@ -372,18 +427,30 @@ export function App() {
       <span>다른 앱에서 텍스트를 복사한 뒤 단축키를 누르면 새 프롬프트로 가져옵니다.</span>
     </section>
     <section className={`interceptor-bar${interceptor.enabled ? ' interceptor-on' : ''}${interceptor.error ? ' interceptor-error' : ''}`}>
-      <div><strong>데스크톱 AI 프롬프트 자동 가로채기</strong>
-        <span>ChatGPT·Claude·Codex와 IDE의 AI 채팅 입력란에서만 작동합니다. 브라우저, 검색창, 코드 편집기는 제외됩니다.</span></div>
-      <button type="button" onClick={toggleInterceptor} disabled={!interceptor.available}>
-        {interceptor.enabled ? '가로채기 끄기' : '가로채기 켜기'}
-      </button>
+      <div className="interceptor-copy"><strong>데스크톱 AI 프롬프트 자동 가로채기</strong>
+        <span>ChatGPT·Claude·Codex와 IDE의 AI 채팅 입력란에서만 작동합니다. Enter 또는 보내기 버튼을 빠르게 두 번 누르면 바로 전송됩니다.</span></div>
+      <div className="interceptor-actions">
+        <label htmlFor="desktop-bypass-shortcut">바로 전송</label>
+        <select id="desktop-bypass-shortcut" value={interceptor.bypassShortcut}
+          onChange={(event) => void changeInterceptorBypassShortcut(event.target.value as 'ctrl-enter' | 'alt-enter')}>
+          <option value="ctrl-enter">Ctrl+Enter</option>
+          <option value="alt-enter">Alt+Enter</option>
+        </select>
+        <button type="button" onClick={toggleInterceptor} disabled={!interceptor.available}>
+          {interceptor.enabled ? '가로채기 끄기' : '가로채기 켜기'}
+        </button>
+      </div>
       {interceptor.error && <small>{interceptor.error}</small>}
     </section>
 
     <section className="workspace">
       <div className="panel interview-panel">
         <div className="panel-heading"><div><span className="step-label">01 / INTERVIEW</span><h2>{phaseLabel(session)}</h2></div>
-          <button className="ghost-button" type="button" onClick={reset}>새로 시작</button></div>
+          <div className="output-actions">
+            {session && <button className="ghost-button" type="button" onClick={() => startInterview(true)}
+              disabled={busy || !originalPrompt.trim()}>인터뷰 다시 하기</button>}
+            <button className="ghost-button" type="button" onClick={reset} disabled={busy}>새로 시작</button>
+          </div></div>
 
         <div className="clipboard-row"><button type="button" onClick={() => readClipboard()}>클립보드에서 가져오기</button></div>
         <label htmlFor="desktop-prompt">원본 프롬프트</label>
@@ -428,19 +495,19 @@ export function App() {
             </div></>}
         </div>
 
-        {!session && <button className="capture-button" type="button" onClick={startInterview} disabled={busy || !originalPrompt.trim()}>
+        {!session && <button className="capture-button" type="button" onClick={() => startInterview()} disabled={busy || !originalPrompt.trim()}>
           인터뷰 시작</button>}
         {session?.phase === 'generating' && <div className="loading-card"><i /> 프롬프트를 분석하고 있습니다.</div>}
         {session?.phase === 'error' && <div className="error-card">{session.error?.message}</div>}
 
-        {session && session.phase !== 'generating' && session.phase !== 'error' && <>
+        <>
           <label htmlFor="target">최적화 대상</label><select id="target" value={targetId} onChange={(event) => {
             const nextTarget = event.target.value
-            setTargetId(nextTarget)
+            selectTarget(nextTarget, true)
             if (session) void persistProject(session, resultPrompt, { targetId: nextTarget })
           }}>
             {DEFAULT_TARGET_PROFILES.map((item) => <option value={item.id} key={item.id}>{item.displayName}</option>)}
-          </select></>}
+          </select></>
 
         {session?.phase === 'interviewing' && question && <section className="question-card">
           <div className="progress-row"><span>INTERVIEW</span><span>{session.currentQuestionIndex + 1} / {session.questions.length}</span></div>

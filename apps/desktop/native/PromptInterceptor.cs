@@ -13,11 +13,16 @@ internal static class PromptInterceptor
     private const int WH_MOUSE_LL = 14;
     private const int WM_KEYDOWN = 0x0100;
     private const int WM_KEYUP = 0x0101;
+    private const int WM_SYSKEYDOWN = 0x0104;
+    private const int WM_SYSKEYUP = 0x0105;
     private const int WM_LBUTTONDOWN = 0x0201;
     private const int WM_LBUTTONUP = 0x0202;
     private const int VK_RETURN = 0x0D;
     private const int VK_SHIFT = 0x10;
+    private const int VK_CONTROL = 0x11;
+    private const int VK_MENU = 0x12;
     private const int GCS_COMPSTR = 0x0008;
+    private const int DOUBLE_SEND_WINDOW_MS = 500;
 
     private static readonly LowLevelProc KeyboardProc = KeyboardHook;
     private static readonly LowLevelProc MouseProc = MouseHook;
@@ -25,11 +30,18 @@ internal static class PromptInterceptor
     private static IntPtr mouseHook = IntPtr.Zero;
     private static bool suppressReturnKeyUp;
     private static bool suppressLeftButtonUp;
+    private static bool returnKeyDown;
+    private static string bypassShortcut = "ctrl-enter";
+    private static readonly object PendingLock = new object();
+    private static Capture pendingCapture;
+    private static long pendingCaptureAt;
+    private static System.Threading.Timer pendingCaptureTimer;
     private static bool debug;
 
     [STAThread]
     private static void Main(string[] args)
     {
+        SetProcessDPIAware();
         Console.OutputEncoding = new UTF8Encoding(false);
         foreach (string argument in args)
         {
@@ -48,7 +60,11 @@ internal static class PromptInterceptor
             Environment.ExitCode = PasteToWindow(new IntPtr(rawWindow)) ? 0 : 4;
             return;
         }
-        foreach (string argument in args) if (argument == "--debug") debug = true;
+        foreach (string argument in args)
+        {
+            if (argument == "--debug") debug = true;
+            if (argument == "--bypass-shortcut=alt-enter") bypassShortcut = "alt-enter";
+        }
         keyboardHook = SetHook(WH_KEYBOARD_LL, KeyboardProc);
         mouseHook = SetHook(WH_MOUSE_LL, MouseProc);
         if (keyboardHook == IntPtr.Zero || mouseHook == IntPtr.Zero)
@@ -69,20 +85,39 @@ internal static class PromptInterceptor
         if (code >= 0)
         {
             int virtualKey = Marshal.ReadInt32(data);
-            if (message == (IntPtr)WM_KEYUP && virtualKey == VK_RETURN && suppressReturnKeyUp)
+            bool keyUp = message == (IntPtr)WM_KEYUP || message == (IntPtr)WM_SYSKEYUP;
+            bool keyDown = message == (IntPtr)WM_KEYDOWN || message == (IntPtr)WM_SYSKEYDOWN;
+            if (keyUp && virtualKey == VK_RETURN)
             {
-                suppressReturnKeyUp = false;
-                return (IntPtr)1;
+                returnKeyDown = false;
+                if (suppressReturnKeyUp)
+                {
+                    suppressReturnKeyUp = false;
+                    return (IntPtr)1;
+                }
             }
 
-            if (message == (IntPtr)WM_KEYDOWN && virtualKey == VK_RETURN)
+            if (keyDown && virtualKey == VK_RETURN)
             {
+                // 키를 누르고 있을 때의 auto-repeat는 두 번 입력으로 취급하지 않는다.
+                if (returnKeyDown) return (IntPtr)1;
+                returnKeyDown = true;
                 if (IsKeyDown(VK_SHIFT) || HasImeComposition()) return CallNextHookEx(keyboardHook, code, message, data);
+                if (IsBypassShortcut())
+                {
+                    CancelPendingCapture();
+                    Debug("shortcut-bypass:" + bypassShortcut);
+                    return CallNextHookEx(keyboardHook, code, message, data);
+                }
                 Capture capture;
                 if (TryCaptureFocusedPrompt("enter", out capture))
                 {
+                    if (TryBypassOrSchedule(capture))
+                    {
+                        Debug("double-send-bypass:enter");
+                        return CallNextHookEx(keyboardHook, code, message, data);
+                    }
                     suppressReturnKeyUp = true;
-                    Emit(capture);
                     return (IntPtr)1;
                 }
             }
@@ -97,6 +132,7 @@ internal static class PromptInterceptor
             if (message == (IntPtr)WM_LBUTTONUP && suppressLeftButtonUp)
             {
                 suppressLeftButtonUp = false;
+                Debug("suppress-click-up");
                 return (IntPtr)1;
             }
 
@@ -106,13 +142,83 @@ internal static class PromptInterceptor
                 Capture capture;
                 if (IsSendButtonAt(info.point) && TryCaptureFocusedPrompt("click", out capture))
                 {
+                    if (TryBypassOrSchedule(capture))
+                    {
+                        Debug("double-send-bypass:click");
+                        return CallNextHookEx(mouseHook, code, message, data);
+                    }
                     suppressLeftButtonUp = true;
-                    Emit(capture);
                     return (IntPtr)1;
                 }
             }
         }
         return CallNextHookEx(mouseHook, code, message, data);
+    }
+
+    private static bool TryBypassOrSchedule(Capture capture)
+    {
+        Capture expired = null;
+        bool bypass = false;
+        lock (PendingLock)
+        {
+            long now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+            if (pendingCapture != null
+                && pendingCapture.Window == capture.Window
+                && pendingCapture.Prompt == capture.Prompt
+                && now - pendingCaptureAt >= 0
+                && now - pendingCaptureAt <= DOUBLE_SEND_WINDOW_MS)
+            {
+                bypass = true;
+            }
+            else if (pendingCapture != null)
+            {
+                expired = pendingCapture;
+            }
+
+            if (pendingCaptureTimer != null) pendingCaptureTimer.Dispose();
+            pendingCaptureTimer = null;
+            pendingCapture = null;
+
+            if (!bypass)
+            {
+                pendingCapture = capture;
+                pendingCaptureAt = now;
+                pendingCaptureTimer = new System.Threading.Timer(EmitPendingCapture, null, DOUBLE_SEND_WINDOW_MS, Timeout.Infinite);
+                Debug("scheduled-intercept:" + capture.Trigger);
+            }
+        }
+        if (expired != null) Emit(expired);
+        return bypass;
+    }
+
+    private static void EmitPendingCapture(object ignored)
+    {
+        Capture capture = null;
+        lock (PendingLock)
+        {
+            capture = pendingCapture;
+            pendingCapture = null;
+            if (pendingCaptureTimer != null) pendingCaptureTimer.Dispose();
+            pendingCaptureTimer = null;
+        }
+        if (capture != null) Emit(capture);
+    }
+
+    private static void CancelPendingCapture()
+    {
+        lock (PendingLock)
+        {
+            pendingCapture = null;
+            if (pendingCaptureTimer != null) pendingCaptureTimer.Dispose();
+            pendingCaptureTimer = null;
+        }
+    }
+
+    private static bool IsBypassShortcut()
+    {
+        bool control = IsKeyDown(VK_CONTROL);
+        bool alt = IsKeyDown(VK_MENU);
+        return bypassShortcut == "alt-enter" ? alt && !control : control && !alt;
     }
 
     private static bool TryCaptureFocusedPrompt(string trigger, out Capture capture)
@@ -164,13 +270,55 @@ internal static class PromptInterceptor
         if (!TryGetAllowedTarget(foreground, out ignored, out target)) return false;
         try
         {
+            IntPtr pointWindow = WindowFromPoint(point);
+            if (pointWindow != IntPtr.Zero)
+            {
+                StringBuilder className = new StringBuilder(128);
+                StringBuilder windowText = new StringBuilder(256);
+                GetClassName(pointWindow, className, className.Capacity);
+                GetWindowText(pointWindow, windowText, windowText.Capacity);
+                if (className.ToString().ToLowerInvariant().Contains("button")
+                    && IsSendDescriptor(windowText.ToString())) return true;
+            }
+
             AutomationElement element = AutomationElement.FromPoint(new Point(point.x, point.y));
-            if (element == null || element.Current.ControlType != ControlType.Button) return false;
+            if (element == null) { Debug("send-element-null"); return false; }
+            if (element.Current.ControlType != ControlType.Button)
+            {
+                IntPtr childWindow = WindowFromPoint(point);
+                if (childWindow != IntPtr.Zero)
+                {
+                    AutomationElement windowElement = AutomationElement.FromHandle(childWindow);
+                    if (windowElement != null && windowElement.Current.ControlType == ControlType.Button)
+                        element = windowElement;
+                }
+            }
+            if (element.Current.ControlType != ControlType.Button)
+            {
+                AutomationElementCollection buttons = element.FindAll(
+                    TreeScope.Descendants,
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button));
+                element = null;
+                foreach (AutomationElement candidate in buttons)
+                {
+                    Rect bounds = candidate.Current.BoundingRectangle;
+                    if (bounds.Contains(new Point(point.x, point.y))) { element = candidate; break; }
+                }
+                if (element == null) { Debug("send-button-not-found-at-point"); return false; }
+            }
             string descriptor = ((element.Current.AutomationId ?? "") + " " + (element.Current.Name ?? "")).ToLowerInvariant();
-            string[] tokens = { "send", "submit", "전송", "보내기", "메시지 보내" };
-            foreach (string token in tokens) if (descriptor.Contains(token)) return true;
+            Debug("send-candidate:" + descriptor);
+            return IsSendDescriptor(descriptor);
         }
         catch { }
+        return false;
+    }
+
+    private static bool IsSendDescriptor(string descriptor)
+    {
+        string normalized = (descriptor ?? "").ToLowerInvariant();
+        string[] tokens = { "send", "submit", "전송", "보내기", "메시지 보내" };
+        foreach (string token in tokens) if (normalized.Contains(token)) return true;
         return false;
     }
 
@@ -204,7 +352,7 @@ internal static class PromptInterceptor
                 target = new TargetProfile("claude", "Claude", false);
                 return true;
             }
-            if (name == "aipiintercepttest")
+            if (name == "aipiintercepttest" || name == "aipibypasstest")
             {
                 target = new TargetProfile("test", "테스트 앱", false);
                 return true;
@@ -383,7 +531,11 @@ internal static class PromptInterceptor
     [DllImport("user32.dll")] private static extern bool UnhookWindowsHookEx(IntPtr hook);
     [DllImport("user32.dll")] private static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr message, IntPtr data);
     [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
+    [DllImport("user32.dll")] private static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(POINT point);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder className, int maxCount);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int maxCount);
     [DllImport("user32.dll")] private static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr window, int command);
     [DllImport("user32.dll")] private static extern bool BringWindowToTop(IntPtr window);

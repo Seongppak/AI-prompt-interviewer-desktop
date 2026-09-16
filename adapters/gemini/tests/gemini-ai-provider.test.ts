@@ -46,12 +46,10 @@ describe('GeminiAIProvider', () => {
     expect(String(init?.body)).toContain('원문과 인터뷰 결정을 통합')
   })
 
-  it('retries without thinkingConfig when a model rejects that option', async () => {
-    const fetcher = vi.fn<typeof fetch>()
-      .mockResolvedValueOnce(jsonResponse({ error: 'unsupported' }, 400))
-      .mockResolvedValueOnce(jsonResponse({
-        candidates: [{ content: { parts: [{ text: '{"questions":[]}' }] } }],
-      }))
+  it('does not guess thinkingConfig support for a latest alias', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      candidates: [{ content: { parts: [{ text: '{"questions":[]}' }] } }],
+    }))
     const provider = new GeminiAIProvider({
       apiKey: 'test-secret',
       models: ['gemini-flash-latest'],
@@ -60,9 +58,46 @@ describe('GeminiAIProvider', () => {
 
     await provider.generate({ purpose: 'interview-questions', prompt: '질문 생성', responseFormat: 'json' })
 
-    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(String(fetcher.mock.calls[0]?.[1]?.body)).not.toContain('thinkingBudget')
+  })
+
+  it('disables thinking only for a known compatible 2.5 Flash model', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      candidates: [{ content: { parts: [{ text: '{"questions":[]}' }] } }],
+    }))
+    const provider = new GeminiAIProvider({ apiKey: 'test-secret', models: ['gemini-2.5-flash-lite'], fetcher })
+
+    await provider.generate({ purpose: 'interview-questions', prompt: '질문 생성', responseFormat: 'json' })
+
     expect(String(fetcher.mock.calls[0]?.[1]?.body)).toContain('thinkingBudget')
-    expect(String(fetcher.mock.calls[1]?.[1]?.body)).not.toContain('thinkingBudget')
+  })
+
+  it('retries a transient 503 response and emits diagnostic events', async () => {
+    const diagnostics = vi.fn()
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ error: { message: 'high demand' } }, 503))
+      .mockResolvedValueOnce(jsonResponse({ candidates: [{ content: { parts: [{ text: '성공' }] } }] }))
+    const provider = new GeminiAIProvider({
+      apiKey: 'test-secret', models: ['gemini-2.5-flash'], fetcher,
+      retryBaseDelayMs: 0, onDiagnostic: diagnostics,
+    })
+
+    await expect(provider.generate({ purpose: 'prompt-optimization', prompt: 'x' }))
+      .resolves.toEqual({ text: '성공', model: 'gemini-2.5-flash' })
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({ code: 'request_retrying' }))
+  })
+
+  it('returns a short actionable message for exhausted quota', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({
+      error: { message: 'You exceeded your current quota, please check your plan and billing details' },
+    }, 429))
+    const provider = new GeminiAIProvider({ apiKey: 'test-secret', models: ['gemini-2.5-flash'], fetcher })
+
+    await expect(provider.generate({ purpose: 'prompt-optimization', prompt: 'x' }))
+      .rejects.toThrow('할당량이 초과되었습니다')
+    expect(fetcher).toHaveBeenCalledTimes(1)
   })
 
   it('does not include the API key in authentication errors', async () => {

@@ -33,7 +33,7 @@ if (utf8Output !== '{"text":"한글 프롬프트"}') {
 
 execFileSync(`${framework}\\csc.exe`, [
   '/nologo', '/target:winexe', '/platform:x64', '/optimize+',
-  `/out:${resolve(outputDirectory, 'AIPIInterceptTest.exe')}`,
+  `/out:${resolve(outputDirectory, 'AIPIBypassTest.exe')}`,
   `/reference:${framework}\\System.Windows.Forms.dll`,
   `/reference:${framework}\\System.Drawing.dll`,
   resolve(import.meta.dirname, 'AIPIInterceptTest.cs'),
